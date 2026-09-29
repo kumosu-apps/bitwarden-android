@@ -43,7 +43,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bitwarden.ui.platform.base.util.EventsEffect
 import com.bitwarden.ui.platform.base.util.standardHorizontalMargin
 import com.bitwarden.ui.platform.components.button.BitwardenFilledButton
-import com.bitwarden.ui.platform.components.button.BitwardenOutlinedButton
 import com.bitwarden.ui.platform.components.scaffold.BitwardenScaffold
 import com.bitwarden.ui.platform.components.util.rememberVectorPainter
 import com.bitwarden.ui.platform.model.WindowSize
@@ -77,7 +76,6 @@ fun WelcomeScreen(
             }
 
             WelcomeEvent.NavigateToLogin -> onNavigateToLogin()
-            WelcomeEvent.NavigateToStartRegistration -> onNavigateToStartRegistration()
         }
     }
 
@@ -91,7 +89,6 @@ fun WelcomeScreen(
             pagerState = pagerState,
             onPagerSwipe = { viewModel.trySendAction(WelcomeAction.PagerSwipe(it)) },
             onDotClick = { viewModel.trySendAction(WelcomeAction.DotClick(it)) },
-            onCreateAccountClick = { viewModel.trySendAction(WelcomeAction.CreateAccountClick) },
             onLoginClick = { viewModel.trySendAction(WelcomeAction.LoginClick) },
             modifier = Modifier.fillMaxSize(),
         )
@@ -105,7 +102,6 @@ private fun WelcomeScreenContent(
     pagerState: PagerState,
     onPagerSwipe: (Int) -> Unit,
     onDotClick: (Int) -> Unit,
-    onCreateAccountClick: () -> Unit,
     onLoginClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -154,21 +150,12 @@ private fun WelcomeScreenContent(
         )
 
         BitwardenFilledButton(
-            label = stringResource(id = BitwardenString.create_account),
-            onClick = onCreateAccountClick,
-            modifier = Modifier
-                .standardHorizontalMargin(medium = HORIZONTAL_MARGIN_MEDIUM)
-                .fillMaxWidth()
-                .testTag("ChooseAccountCreationButton"),
-        )
-
-        BitwardenOutlinedButton(
-            label = stringResource(id = BitwardenString.log_in_verb),
+            label = stringResource(id = BitwardenString.continue_text),
             onClick = onLoginClick,
             modifier = Modifier
                 .standardHorizontalMargin(medium = HORIZONTAL_MARGIN_MEDIUM)
                 .fillMaxWidth()
-                .testTag("ChooseLoginButton"),
+                .testTag("ContinueFromWelcomeButton"),
         )
 
         Spacer(modifier = Modifier.height(32.dp))

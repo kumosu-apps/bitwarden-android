@@ -24,12 +24,11 @@ fun NavController.navigateToWelcome(navOptions: NavOptions? = null) {
  */
 fun NavGraphBuilder.welcomeDestination(
     onNavigateToLogin: () -> Unit,
-    onNavigateToStartRegistration: () -> Unit,
 ) {
     composableWithStayTransitions<WelcomeRoute> {
         WelcomeScreen(
             onNavigateToLogin = onNavigateToLogin,
-            onNavigateToStartRegistration = onNavigateToStartRegistration,
+            onNavigateToStartRegistration = {},
         )
     }
 }

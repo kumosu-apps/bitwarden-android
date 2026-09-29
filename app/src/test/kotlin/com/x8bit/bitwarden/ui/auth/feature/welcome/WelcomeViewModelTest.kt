@@ -11,12 +11,8 @@ class WelcomeViewModelTest : BaseViewModelTest() {
     @Test
     fun `initial state should be correct`() = runTest {
         val viewModel = createViewModel()
-
         viewModel.stateFlow.test {
-            assertEquals(
-                DEFAULT_STATE,
-                awaitItem(),
-            )
+            assertEquals(DEFAULT_STATE, awaitItem())
         }
     }
 
@@ -24,14 +20,9 @@ class WelcomeViewModelTest : BaseViewModelTest() {
     fun `PagerSwipe should update state`() = runTest {
         val viewModel = createViewModel()
         val newIndex = 2
-
         viewModel.trySendAction(WelcomeAction.PagerSwipe(index = newIndex))
-
         viewModel.stateFlow.test {
-            assertEquals(
-                DEFAULT_STATE.copy(index = newIndex),
-                awaitItem(),
-            )
+            assertEquals(DEFAULT_STATE.copy(index = newIndex), awaitItem())
         }
     }
 
@@ -39,47 +30,21 @@ class WelcomeViewModelTest : BaseViewModelTest() {
     fun `DotClick should update state and emit UpdatePager`() = runTest {
         val viewModel = createViewModel()
         val newIndex = 2
-
         viewModel.trySendAction(WelcomeAction.DotClick(index = newIndex))
-
         viewModel.stateFlow.test {
-            assertEquals(
-                DEFAULT_STATE.copy(index = newIndex),
-                awaitItem(),
-            )
+            assertEquals(DEFAULT_STATE.copy(index = newIndex), awaitItem())
         }
         viewModel.eventFlow.test {
-            assertEquals(
-                WelcomeEvent.UpdatePager(index = newIndex),
-                awaitItem(),
-            )
-        }
-    }
-
-    @Test
-    fun `CreateAccountClick should emit NavigateToStartRegistration`() = runTest {
-        val viewModel = createViewModel()
-        viewModel.trySendAction(WelcomeAction.CreateAccountClick)
-
-        viewModel.eventFlow.test {
-            assertEquals(
-                WelcomeEvent.NavigateToStartRegistration,
-                awaitItem(),
-            )
+            assertEquals(WelcomeEvent.UpdatePager(index = newIndex), awaitItem())
         }
     }
 
     @Test
     fun `LoginClick should emit NavigateToLogin`() = runTest {
         val viewModel = createViewModel()
-
         viewModel.trySendAction(WelcomeAction.LoginClick)
-
         viewModel.eventFlow.test {
-            assertEquals(
-                WelcomeEvent.NavigateToLogin,
-                awaitItem(),
-            )
+            assertEquals(WelcomeEvent.NavigateToLogin, awaitItem())
         }
     }
 

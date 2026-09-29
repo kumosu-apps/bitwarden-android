@@ -16,7 +16,6 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.robolectric.annotation.Config
 
 class WelcomeScreenTest : BitwardenComposeTest() {
-    private var onNavigateToStartRegistrationCalled = false
     private var onNavigateToLoginCalled = false
     private val mutableStateFlow = MutableStateFlow(DEFAULT_STATE)
     private val mutableEventFlow = bufferedMutableSharedFlow<WelcomeEvent>()
@@ -30,7 +29,7 @@ class WelcomeScreenTest : BitwardenComposeTest() {
         setContent {
             WelcomeScreen(
                 onNavigateToLogin = { onNavigateToLoginCalled = true },
-                onNavigateToStartRegistration = { onNavigateToStartRegistrationCalled = true },
+                onNavigateToStartRegistration = {},
                 viewModel = viewModel,
             )
         }
@@ -90,28 +89,12 @@ class WelcomeScreenTest : BitwardenComposeTest() {
     }
 
     @Test
-    fun `create account button click should send CreateAccountClick action`() {
-        composeTestRule
-            .onNodeWithText("Create account")
-            .performClick()
-        verify { viewModel.trySendAction(WelcomeAction.CreateAccountClick) }
-    }
-
-    @Test
-    fun `login button click should send LoginClick action`() {
-        // Use an empty list of pages to guarantee that the login button
-        // will be in view on the UI testing viewport.
+    fun `continue button click should send LoginClick action`() {
         mutableStateFlow.update { it.copy(pages = emptyList()) }
         composeTestRule
-            .onNodeWithText("Log in")
+            .onNodeWithText("Continue")
             .performClick()
         verify { viewModel.trySendAction(WelcomeAction.LoginClick) }
-    }
-
-    @Test
-    fun `on NavigateToStartRegistration event should call onNavigateToStartRegistration`() {
-        mutableEventFlow.tryEmit(WelcomeEvent.NavigateToStartRegistration)
-        assertTrue(onNavigateToStartRegistrationCalled)
     }
 }
 

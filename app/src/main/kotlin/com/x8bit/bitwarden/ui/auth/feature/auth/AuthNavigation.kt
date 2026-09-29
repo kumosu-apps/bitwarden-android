@@ -19,6 +19,8 @@ import com.x8bit.bitwarden.ui.auth.feature.expiredregistrationlink.expiredRegist
 import com.x8bit.bitwarden.ui.auth.feature.landing.LandingRoute
 import com.x8bit.bitwarden.ui.auth.feature.landing.landingDestination
 import com.x8bit.bitwarden.ui.auth.feature.landing.navigateToLanding
+import com.x8bit.bitwarden.ui.auth.feature.oidctoken.navigateToOidcToken
+import com.x8bit.bitwarden.ui.auth.feature.oidctoken.oidcTokenDestination
 import com.x8bit.bitwarden.ui.auth.feature.login.loginDestination
 import com.x8bit.bitwarden.ui.auth.feature.login.navigateToLogin
 import com.x8bit.bitwarden.ui.auth.feature.loginwithdevice.loginWithDeviceDestination
@@ -116,10 +118,12 @@ fun NavGraphBuilder.authGraph(
             },
             onNavigateToStartRegistration = { navController.navigateToStartRegistration() },
             onNavigateToPreAuthSettings = { navController.navigateToPreAuthSettings() },
+            onNavigateToOidcToken = { tokenInfoJson ->
+                navController.navigateToOidcToken(tokenInfoJson = tokenInfoJson)
+            },
         )
         welcomeDestination(
             onNavigateToLogin = { navController.navigateToLanding() },
-            onNavigateToStartRegistration = { navController.navigateToStartRegistration() },
         )
         loginDestination(
             onNavigateBack = { navController.popBackStack() },
@@ -202,6 +206,9 @@ fun NavGraphBuilder.authGraph(
             },
         )
         preAuthSettingsDestinations(navController = navController)
+        oidcTokenDestination(
+            onNavigateBack = { navController.popBackStack() },
+        )
     }
 }
 

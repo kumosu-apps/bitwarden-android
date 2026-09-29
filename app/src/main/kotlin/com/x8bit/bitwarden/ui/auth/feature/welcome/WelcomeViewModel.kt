@@ -29,7 +29,6 @@ class WelcomeViewModel @Inject constructor() :
         when (action) {
             is WelcomeAction.PagerSwipe -> handlePagerSwipe(action)
             is WelcomeAction.DotClick -> handleDotClick(action)
-            WelcomeAction.CreateAccountClick -> handleCreateAccountClick()
             WelcomeAction.LoginClick -> handleLoginClick()
         }
     }
@@ -41,10 +40,6 @@ class WelcomeViewModel @Inject constructor() :
     private fun handleDotClick(action: WelcomeAction.DotClick) {
         mutableStateFlow.update { it.copy(index = action.index) }
         sendEvent(WelcomeEvent.UpdatePager(index = action.index))
-    }
-
-    private fun handleCreateAccountClick() {
-        sendEvent(WelcomeEvent.NavigateToStartRegistration)
     }
 
     private fun handleLoginClick() {
@@ -125,11 +120,6 @@ sealed class WelcomeEvent {
      * Navigates to the login screen.
      */
     data object NavigateToLogin : WelcomeEvent()
-
-    /**
-     * Navigates to the start registration screen.
-     */
-    data object NavigateToStartRegistration : WelcomeEvent()
 }
 
 /**
@@ -149,11 +139,6 @@ sealed class WelcomeAction {
     data class DotClick(
         val index: Int,
     ) : WelcomeAction()
-
-    /**
-     * Click the create account button.
-     */
-    data object CreateAccountClick : WelcomeAction()
 
     /**
      * Click the login button.

@@ -1,449 +1,458 @@
 package com.x8bit.bitwarden.ui.auth.feature.landing
 
+import android.net.Uri
 import android.os.Parcelable
+import androidx.core.net.toUri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
-import com.bitwarden.data.repository.model.Environment
-import com.bitwarden.ui.platform.base.BackgroundEvent
 import com.bitwarden.ui.platform.base.BaseViewModel
-import com.bitwarden.ui.platform.base.util.isValidEmail
-import com.bitwarden.ui.platform.components.account.model.AccountSummary
-import com.bitwarden.ui.platform.components.snackbar.model.BitwardenSnackbarData
-import com.bitwarden.ui.platform.manager.snackbar.SnackbarRelayManager
-import com.bitwarden.ui.platform.resource.BitwardenString
+import com.bitwarden.ui.platform.base.util.prefixHttpsIfNecessaryOrNull
+import com.bitwarden.ui.platform.manager.intent.model.AuthTabData
 import com.bitwarden.ui.util.Text
 import com.bitwarden.ui.util.asText
 import com.x8bit.bitwarden.data.auth.repository.AuthRepository
-import com.x8bit.bitwarden.data.auth.repository.model.LogoutReason
-import com.x8bit.bitwarden.data.auth.repository.model.UserState
+import com.x8bit.bitwarden.data.auth.repository.util.SsoCallbackResult
 import com.x8bit.bitwarden.data.platform.repository.EnvironmentRepository
-import com.x8bit.bitwarden.data.vault.repository.VaultRepository
-import com.x8bit.bitwarden.ui.platform.model.SnackbarRelay
-import com.x8bit.bitwarden.ui.vault.feature.vault.util.toAccountSummaries
+import com.x8bit.bitwarden.data.tools.generator.repository.GeneratorRepository
+import com.x8bit.bitwarden.data.tools.generator.repository.utils.generateRandomString
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.security.MessageDigest
+import java.util.Base64
 import javax.inject.Inject
 
 private const val KEY_STATE = "state"
+private const val KEY_OIDC_DATA = "oidcData"
+private const val KEY_CALLBACK_RESULT = "oidcCallbackResult"
+private const val RANDOM_STRING_LENGTH = 64
+private const val CLIENT_NAME = "Bitwarden Android OIDC Debug"
 
-/**
- * Manages application state for the initial landing screen.
- */
-@Suppress("TooManyFunctions")
 @HiltViewModel
 class LandingViewModel @Inject constructor(
     private val authRepository: AuthRepository,
-    private val vaultRepository: VaultRepository,
     private val environmentRepository: EnvironmentRepository,
-    snackbarRelayManager: SnackbarRelayManager<SnackbarRelay>,
-    savedStateHandle: SavedStateHandle,
+    private val generatorRepository: GeneratorRepository,
+    private val savedStateHandle: SavedStateHandle,
 ) : BaseViewModel<LandingState, LandingEvent, LandingAction>(
     initialState = savedStateHandle[KEY_STATE]
         ?: LandingState(
-            emailInput = authRepository.rememberedEmailAddress.orEmpty(),
-            isContinueButtonEnabled = authRepository.rememberedEmailAddress != null,
-            isRememberEmailEnabled = authRepository.rememberedEmailAddress != null,
-            selectedEnvironmentType = environmentRepository.environment.type,
-            selectedEnvironmentLabel = environmentRepository.environment.label,
+            serverUrl = "",
+            isContinueButtonEnabled = false,
             dialog = null,
-            accountSummaries = authRepository.userStateFlow.value?.toAccountSummaries().orEmpty(),
         ),
 ) {
 
-    /**
-     * Returns the [AccountSummary] from the current state that matches the current email input and
-     * the the current environment, or `null` if there is no match.
-     */
-    private val matchingAccountSummary: AccountSummary?
-        get() {
-            val currentEmail = state.emailInput
-            val currentEnvironmentLabel = state.selectedEnvironmentLabel
-            val accountSummaries = state.accountSummaries
-            return accountSummaries
-                .find {
-                    it.email == currentEmail &&
-                        it.environmentLabel == currentEnvironmentLabel
-                }
-                ?.takeUnless { !it.isLoggedIn }
+    private var oidcData: OidcFlowData?
+        get() = savedStateHandle[KEY_OIDC_DATA]
+        set(value) {
+            savedStateHandle[KEY_OIDC_DATA] = value
+        }
+
+    private var savedCallbackResult: SsoCallbackResult?
+        get() = savedStateHandle[KEY_CALLBACK_RESULT]
+        set(value) {
+            savedStateHandle[KEY_CALLBACK_RESULT] = value
         }
 
     init {
-        // As state updates:
-        // - write to saved state handle
         stateFlow
-            .onEach {
-                savedStateHandle[KEY_STATE] = it
-            }
-            .launchIn(viewModelScope)
-
-        // Listen for changes in environment triggered both by this VM and externally.
-        environmentRepository
-            .environmentStateFlow
-            .onEach { environment ->
-                sendAction(
-                    LandingAction.Internal.UpdatedEnvironmentReceive(environment = environment),
-                )
-            }
+            .onEach { savedStateHandle[KEY_STATE] = it }
             .launchIn(viewModelScope)
 
         authRepository
-            .userStateFlow
-            .map { userState ->
-                userState?.activeAccount?.let(::mapToInternalActionOrNull)
+            .ssoCallbackResultFlow
+            .onEach {
+                sendAction(LandingAction.Internal.OnOidcCallbackResult(it))
             }
-            .onEach { action ->
-                action?.let(::handleAction)
-            }
-            .launchIn(viewModelScope)
-        snackbarRelayManager
-            .getSnackbarDataFlow(SnackbarRelay.ENVIRONMENT_SAVED)
-            .map { LandingAction.Internal.SnackbarDataReceived(it) }
-            .onEach(::sendAction)
             .launchIn(viewModelScope)
     }
 
     override fun handleAction(action: LandingAction) {
         when (action) {
-            is LandingAction.AppSettingsClick -> handleAppSettingsClick()
-            is LandingAction.LockAccountClick -> handleLockAccountClicked(action)
-            is LandingAction.LogoutAccountClick -> handleLogoutAccountClicked(action)
-            is LandingAction.SwitchAccountClick -> handleSwitchAccountClicked(action)
-            is LandingAction.ConfirmSwitchToMatchingAccountClick -> {
-                handleConfirmSwitchToMatchingAccountClicked(action)
-            }
-
-            is LandingAction.ContinueButtonClick -> handleContinueButtonClicked()
-            LandingAction.CreateAccountClick -> handleCreateAccountClicked()
-            is LandingAction.DialogDismiss -> handleDialogDismiss()
-            is LandingAction.RememberMeToggle -> handleRememberMeToggled(action)
-            is LandingAction.EmailInputChanged -> handleEmailInputChanged(action)
-            is LandingAction.EnvironmentTypeSelect -> handleEnvironmentTypeSelect(action)
-            is LandingAction.Internal -> handleInternalActions(action)
-        }
-    }
-
-    private fun handleInternalActions(action: LandingAction.Internal) {
-        when (action) {
-            is LandingAction.Internal.UpdateEmailState -> handleInternalEmailStateUpdate(action)
-            is LandingAction.Internal.UpdatedEnvironmentReceive -> {
-                handleUpdatedEnvironmentReceive(action)
-            }
-
-            is LandingAction.Internal.SnackbarDataReceived -> handleSnackbarDataReceived(action)
+            LandingAction.AppSettingsClick -> handleAppSettingsClick()
+            LandingAction.ContinueButtonClick -> handleContinueClick()
+            LandingAction.DialogDismiss -> handleDialogDismiss()
+            is LandingAction.ServerUrlChange -> handleServerUrlChange(action)
+            is LandingAction.Internal -> handleInternal(action)
         }
     }
 
     private fun handleAppSettingsClick() {
-        sendEvent(LandingEvent.NavigateToSettings)
     }
 
-    private fun handleLockAccountClicked(action: LandingAction.LockAccountClick) {
-        vaultRepository.lockVault(userId = action.accountSummary.userId, isUserInitiated = true)
+    private fun handleServerUrlChange(action: LandingAction.ServerUrlChange) {
+        mutableStateFlow.update {
+            it.copy(
+                serverUrl = action.serverUrl,
+                isContinueButtonEnabled = action.serverUrl.isNotBlank(),
+                dialog = null,
+            )
+        }
     }
 
-    private fun handleLogoutAccountClicked(action: LandingAction.LogoutAccountClick) {
-        authRepository.logout(
-            userId = action.accountSummary.userId,
-            reason = LogoutReason.Click(source = "LandingViewModel"),
+    private fun handleContinueClick() {
+        val serverUrl = state.serverUrl
+            .trimEnd('/')
+            .prefixHttpsIfNecessaryOrNull()
+            ?: return
+
+        mutableStateFlow.update {
+            it.copy(serverUrl = serverUrl)
+        }
+
+        showLoading("Discovering OIDC configuration...")
+        viewModelScope.launch {
+            discoverOidc(serverUrl)
+        }
+    }
+
+    private suspend fun discoverOidc(serverUrl: String) {
+        try {
+            val wellKnownUrl = "$serverUrl/.well-known/openid-configuration"
+            val jsonString = withContext(Dispatchers.IO) {
+                val connection = URL(wellKnownUrl).openConnection() as HttpURLConnection
+                connection.connectTimeout = 10_000
+                connection.readTimeout = 10_000
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Accept", "application/json")
+                val responseCode = connection.responseCode
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    throw Exception("HTTP $responseCode from well-known endpoint")
+                }
+                connection.inputStream.bufferedReader().readText()
+            }
+
+            val oidcConfig = Json.parseToJsonElement(jsonString).jsonObject
+            val authorizationEndpoint = oidcConfig["authorization_endpoint"]?.jsonPrimitive?.content
+                ?: throw Exception("Missing authorization_endpoint in OIDC config")
+            val tokenEndpoint = oidcConfig["token_endpoint"]?.jsonPrimitive?.content
+                ?: throw Exception("Missing token_endpoint in OIDC config")
+            val issuer = oidcConfig["issuer"]?.jsonPrimitive?.content ?: serverUrl
+            val registrationEndpoint = oidcConfig["registration_endpoint"]?.jsonPrimitive?.content
+
+            if (registrationEndpoint != null) {
+                showLoading("Registering client dynamically...")
+                val clientId = registerClient(registrationEndpoint)
+                launchOidcAuthorization(
+                    serverUrl = serverUrl,
+                    authorizationEndpoint = authorizationEndpoint,
+                    tokenEndpoint = tokenEndpoint,
+                    issuer = issuer,
+                    clientId = clientId,
+                )
+            } else {
+                showError("No registration_endpoint in OIDC discovery. Dynamic client registration is required.")
+            }
+        } catch (e: Exception) {
+            showError("Failed to discover OIDC: ${e.message}")
+        }
+    }
+
+    private suspend fun registerClient(registrationEndpoint: String): String {
+        val registrationJson = """
+            {
+                "client_name": "$CLIENT_NAME",
+                "redirect_uris": ["bitwarden://sso-callback"],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none"
+            }
+        """.trimIndent()
+
+        val responseJson = withContext(Dispatchers.IO) {
+            val connection = URL(registrationEndpoint).openConnection() as HttpURLConnection
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.doOutput = true
+
+            connection.outputStream.bufferedWriter().use { writer ->
+                writer.write(registrationJson)
+                writer.flush()
+            }
+
+            val responseCode = connection.responseCode
+            if (responseCode != HttpURLConnection.HTTP_CREATED &&
+                responseCode != HttpURLConnection.HTTP_OK
+            ) {
+                val errorBody = try {
+                    connection.errorStream.bufferedReader().readText()
+                } catch (_: Exception) {
+                    "no error body"
+                }
+                throw Exception("HTTP $responseCode from registration endpoint: $errorBody")
+            }
+
+            connection.inputStream.bufferedReader().readText()
+        }
+
+        val registrationResponse = Json.parseToJsonElement(responseJson).jsonObject
+        return registrationResponse["client_id"]?.jsonPrimitive?.content
+            ?: throw Exception("Missing client_id in registration response")
+    }
+
+    private suspend fun launchOidcAuthorization(
+        serverUrl: String,
+        authorizationEndpoint: String,
+        tokenEndpoint: String,
+        issuer: String,
+        clientId: String,
+    ) {
+        val codeVerifier = generatorRepository.generateRandomString(RANDOM_STRING_LENGTH)
+        val state = generatorRepository.generateRandomString(RANDOM_STRING_LENGTH)
+        val redirectUri = "bitwarden://sso-callback"
+
+        val codeChallenge = Base64.getUrlEncoder().withoutPadding().encodeToString(
+            MessageDigest
+                .getInstance("SHA-256")
+                .digest(codeVerifier.toByteArray()),
+        )
+
+        oidcData = OidcFlowData(
+            serverUrl = serverUrl,
+            tokenEndpoint = tokenEndpoint,
+            issuer = issuer,
+            clientId = clientId,
+            codeVerifier = codeVerifier,
+            state = state,
+        )
+
+        val encodedRedirectUri = URLEncoder.encode(redirectUri, "UTF-8")
+        val uri = "$authorizationEndpoint" +
+            "?client_id=${URLEncoder.encode(clientId, "UTF-8")}" +
+            "&redirect_uri=$encodedRedirectUri" +
+            "&response_type=code" +
+            "&scope=openid%20profile%20email" +
+            "&state=$state" +
+            "&code_challenge=$codeChallenge" +
+            "&code_challenge_method=S256" +
+            "&response_mode=query"
+
+        mutableStateFlow.update { it.copy(dialog = null) }
+        sendEvent(
+            LandingEvent.NavigateToSsoLogin(
+                uri = uri.toUri(),
+                authTabData = AuthTabData.CustomScheme(
+                    callbackUrl = redirectUri,
+                ),
+            ),
         )
     }
 
-    private fun handleSwitchAccountClicked(action: LandingAction.SwitchAccountClick) {
-        authRepository.switchAccount(userId = action.accountSummary.userId)
+    private fun handleInternal(action: LandingAction.Internal) {
+        when (action) {
+            is LandingAction.Internal.OnOidcCallbackResult -> {
+                savedCallbackResult = action.ssoCallbackResult
+                attemptTokenExchange()
+            }
+        }
     }
 
-    private fun handleConfirmSwitchToMatchingAccountClicked(
-        action: LandingAction.ConfirmSwitchToMatchingAccountClick,
+    private fun attemptTokenExchange() {
+        val callbackResult = requireNotNull(savedCallbackResult)
+        val data = requireNotNull(oidcData)
+
+        when (callbackResult) {
+            is SsoCallbackResult.MissingCode -> {
+                showError("Authorization failed: no code received")
+            }
+            is SsoCallbackResult.Success -> {
+                if (callbackResult.state != data.state) {
+                    showError("Authorization failed: state mismatch")
+                    return
+                }
+
+                showLoading("Exchanging code for tokens...")
+                viewModelScope.launch {
+                    exchangeCodeForTokens(
+                        tokenEndpoint = data.tokenEndpoint,
+                        code = callbackResult.code,
+                        codeVerifier = data.codeVerifier,
+                        clientId = data.clientId,
+                        redirectUri = "bitwarden://sso-callback",
+                        serverUrl = data.serverUrl,
+                        issuer = data.issuer,
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun exchangeCodeForTokens(
+        tokenEndpoint: String,
+        code: String,
+        codeVerifier: String,
+        clientId: String,
+        redirectUri: String,
+        serverUrl: String,
+        issuer: String,
     ) {
-        authRepository.switchAccount(userId = action.accountSummary.userId)
-    }
+        try {
+            val body = mapOf(
+                "grant_type" to "authorization_code",
+                "code" to code,
+                "redirect_uri" to redirectUri,
+                "client_id" to clientId,
+                "code_verifier" to codeVerifier,
+            ).entries.joinToString("&") { (key, value) ->
+                "${URLEncoder.encode(key, "UTF-8")}=${URLEncoder.encode(value, "UTF-8")}"
+            }
 
-    private fun handleEmailInputChanged(action: LandingAction.EmailInputChanged) {
-        updateEmailInput(action.input)
-    }
+            val responseJson = withContext(Dispatchers.IO) {
+                val connection = URL(tokenEndpoint).openConnection() as HttpURLConnection
+                connection.connectTimeout = 10_000
+                connection.readTimeout = 10_000
+                connection.requestMethod = "POST"
+                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                connection.doOutput = true
 
-    private fun handleInternalEmailStateUpdate(action: LandingAction.Internal.UpdateEmailState) {
-        updateEmailInput(action.emailInput)
-    }
+                connection.outputStream.bufferedWriter().use { writer ->
+                    writer.write(body)
+                    writer.flush()
+                }
 
-    private fun updateEmailInput(updatedInput: String) {
-        mutableStateFlow.update {
-            it.copy(
-                emailInput = updatedInput,
-                isContinueButtonEnabled = updatedInput.isNotBlank(),
+                val responseCode = connection.responseCode
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    val errorBody = try {
+                        connection.errorStream.bufferedReader().readText()
+                    } catch (_: Exception) {
+                        "no error body"
+                    }
+                    throw Exception("HTTP $responseCode from token endpoint: $errorBody")
+                }
+
+                connection.inputStream.bufferedReader().readText()
+            }
+
+            val tokenInfo = buildTokenInfo(
+                responseJson = responseJson,
+                serverUrl = serverUrl,
+                issuer = issuer,
+                clientId = clientId,
+                tokenEndpoint = tokenEndpoint,
             )
+
+            mutableStateFlow.update { it.copy(dialog = null) }
+            sendEvent(LandingEvent.NavigateToOidcToken(tokenInfo))
+        } catch (e: Exception) {
+            showError("Token exchange failed: ${e.message}")
         }
     }
 
-    private fun handleContinueButtonClicked() {
-        if (!state.emailInput.isValidEmail(useStrictValidation = false)) {
-            mutableStateFlow.update {
-                it.copy(
-                    dialog = LandingState.DialogState.Error(
-                        message = BitwardenString.invalid_email.asText(),
-                    ),
-                )
+    private fun buildTokenInfo(
+        responseJson: String,
+        serverUrl: String,
+        issuer: String,
+        clientId: String,
+        tokenEndpoint: String,
+    ): String {
+        val parts = mutableListOf<String>()
+        parts.add("Server URL: $serverUrl")
+        parts.add("Issuer: $issuer")
+        parts.add("Client ID: $clientId")
+        parts.add("Token Endpoint: $tokenEndpoint")
+        parts.add("")
+
+        try {
+            val json = Json.parseToJsonElement(responseJson).jsonObject
+            json.forEach { (key, value) ->
+                val displayValue = when (key) {
+                    "access_token", "refresh_token", "id_token" -> {
+                        val token = value.jsonPrimitive.content
+                        if (token.length > 50) {
+                            "${token.take(30)}...${token.takeLast(20)}"
+                        } else {
+                            token
+                        }
+                    }
+                    else -> value.toString()
+                }
+                parts.add("$key: $displayValue")
             }
-            return
+        } catch (_: Exception) {
+            parts.add("Raw response: $responseJson")
         }
 
-        matchingAccountSummary?.let { accountSummary ->
-            mutableStateFlow.update {
-                it.copy(
-                    dialog = LandingState.DialogState.AccountAlreadyAdded(
-                        accountSummary = accountSummary,
-                    ),
-                )
-            }
-            return
-        }
-
-        val email = state.emailInput
-        val isRememberMeEnabled = state.isRememberEmailEnabled
-
-        // Update the remembered email address
-        authRepository.rememberedEmailAddress = email.takeUnless { !isRememberMeEnabled }
-
-        sendEvent(LandingEvent.NavigateToLogin(email))
-    }
-
-    private fun handleCreateAccountClicked() {
-        sendEvent(LandingEvent.NavigateToStartRegistration)
+        return parts.joinToString("\n")
     }
 
     private fun handleDialogDismiss() {
-        mutableStateFlow.update {
-            it.copy(dialog = null)
-        }
+        mutableStateFlow.update { it.copy(dialog = null) }
     }
 
-    private fun handleRememberMeToggled(action: LandingAction.RememberMeToggle) {
-        mutableStateFlow.update { it.copy(isRememberEmailEnabled = action.isChecked) }
-    }
-
-    private fun handleEnvironmentTypeSelect(action: LandingAction.EnvironmentTypeSelect) {
-        val environment = when (action.environmentType) {
-            Environment.Type.US -> Environment.Us
-            Environment.Type.EU -> Environment.Eu
-            Environment.Type.SELF_HOSTED -> {
-                // Launch the self-hosted screen and select the full environment details there.
-                sendEvent(LandingEvent.NavigateToEnvironment)
-                return
-            }
-        }
-
-        // Update the environment in the repo; the VM state will update accordingly because it is
-        // listening for changes.
-        environmentRepository.environment = environment
-    }
-
-    private fun handleUpdatedEnvironmentReceive(
-        action: LandingAction.Internal.UpdatedEnvironmentReceive,
-    ) {
+    private fun showError(message: String) {
         mutableStateFlow.update {
             it.copy(
-                selectedEnvironmentType = action.environment.type,
-                selectedEnvironmentLabel = action.environment.label,
+                dialog = LandingState.DialogState.Error(message = message.asText()),
             )
         }
     }
 
-    private fun handleSnackbarDataReceived(action: LandingAction.Internal.SnackbarDataReceived) {
-        sendEvent(LandingEvent.ShowSnackbar(action.data))
-    }
-
-    /**
-     * If the user state account is changed to an active but not "logged in" account we can
-     * pre-populate the email field with this account.
-     */
-    private fun mapToInternalActionOrNull(
-        activeAccount: UserState.Account,
-    ): LandingAction.Internal.UpdateEmailState? {
-        val activeUserNotLoggedIn = !activeAccount.isLoggedIn
-        val noPendingAdditions = !authRepository.hasPendingAccountAddition
-        return LandingAction.Internal.UpdateEmailState(activeAccount.email)
-            .takeIf { activeUserNotLoggedIn && noPendingAdditions }
+    private fun showLoading(message: String) {
+        mutableStateFlow.update {
+            it.copy(
+                dialog = LandingState.DialogState.Loading(message = message.asText()),
+            )
+        }
     }
 }
 
-/**
- * Models state of the landing screen.
- */
 @Parcelize
 data class LandingState(
-    val emailInput: String,
+    val serverUrl: String,
     val isContinueButtonEnabled: Boolean,
-    val isRememberEmailEnabled: Boolean,
-    val selectedEnvironmentType: Environment.Type,
-    val selectedEnvironmentLabel: String,
     val dialog: DialogState?,
-    val accountSummaries: List<AccountSummary>,
 ) : Parcelable {
-    /**
-     * Determines whether the app bar should be visible based on the presence of account summaries.
-     */
-    val isAppBarVisible: Boolean
-        get() = accountSummaries.isNotEmpty()
-
-    /**
-     * Represents the current state of any dialogs on screen.
-     */
     sealed class DialogState : Parcelable {
-
-        /**
-         * Represents a dialog indicating that the current email matches the existing
-         * [accountSummary].
-         */
         @Parcelize
-        data class AccountAlreadyAdded(
-            val accountSummary: AccountSummary,
-        ) : DialogState()
+        data class Error(val message: Text) : DialogState()
 
-        /**
-         * Represents an error dialog with the given [message].
-         */
         @Parcelize
-        data class Error(
-            val message: Text,
-        ) : DialogState()
+        data class Loading(val message: Text) : DialogState()
     }
 }
 
-/**
- * Models events for the landing screen.
- */
 sealed class LandingEvent {
-    /**
-     * Navigates to the Start Registration screen.
-     */
-    data object NavigateToStartRegistration : LandingEvent()
+    data class NavigateToOidcToken(val tokenInfoJson: String) : LandingEvent()
 
-    /**
-     * Navigates to the pre-auth settings screen.
-     */
-    data object NavigateToSettings : LandingEvent()
-
-    /**
-     * Navigates to the Login screen with the given email address and region label.
-     */
-    data class NavigateToLogin(
-        val emailAddress: String,
+    data class NavigateToSsoLogin(
+        val uri: Uri,
+        val authTabData: AuthTabData,
     ) : LandingEvent()
-
-    /**
-     * Navigates to the self-hosted/custom environment screen.
-     */
-    data object NavigateToEnvironment : LandingEvent()
-
-    /**
-     * Show a snackbar with the given [data].
-     */
-    data class ShowSnackbar(
-        val data: BitwardenSnackbarData,
-    ) : LandingEvent(), BackgroundEvent
 }
 
-/**
- * Models actions for the landing screen.
- */
 sealed class LandingAction {
-    /**
-     * Indicates that the app settings button has been clicked.
-     */
     data object AppSettingsClick : LandingAction()
-
-    /**
-     * Indicates the user has clicked on the given [accountSummary] information in order to lock
-     * the associated account's vault.
-     */
-    data class LockAccountClick(
-        val accountSummary: AccountSummary,
-    ) : LandingAction()
-
-    /**
-     * Indicates the user has clicked on the given [accountSummary] information in order to log out
-     * of that account.
-     */
-    data class LogoutAccountClick(
-        val accountSummary: AccountSummary,
-    ) : LandingAction()
-
-    /**
-     * Indicates the user has clicked on the given [accountSummary] information in order to switch
-     * to it.
-     */
-    data class SwitchAccountClick(
-        val accountSummary: AccountSummary,
-    ) : LandingAction()
-
-    /**
-     * Indicates the user has confirmed they would like to switch to the existing [accountSummary].
-     */
-    data class ConfirmSwitchToMatchingAccountClick(
-        val accountSummary: AccountSummary,
-    ) : LandingAction()
-
-    /**
-     * Indicates that the continue button has been clicked and the app should navigate to Login.
-     */
     data object ContinueButtonClick : LandingAction()
-
-    /**
-     * Indicates that the Create Account text was clicked.
-     */
-    data object CreateAccountClick : LandingAction()
-
-    /**
-     * Indicates that a dialog is attempting to be dismissed.
-     */
     data object DialogDismiss : LandingAction()
 
-    /**
-     * Indicates that the Remember Me switch has been toggled.
-     */
-    data class RememberMeToggle(
-        val isChecked: Boolean,
-    ) : LandingAction()
+    data class ServerUrlChange(val serverUrl: String) : LandingAction()
 
-    /**
-     * Indicates that the input on the email field has changed.
-     */
-    data class EmailInputChanged(
-        val input: String,
-    ) : LandingAction()
-
-    /**
-     * Indicates that the selection from the region drop down has changed.
-     */
-    data class EnvironmentTypeSelect(
-        val environmentType: Environment.Type,
-    ) : LandingAction()
-
-    /**
-     * Actions for internal use by the ViewModel.
-     */
     sealed class Internal : LandingAction() {
-        /**
-         * Indicates that snackbar data has been received.
-         */
-        data class SnackbarDataReceived(
-            val data: BitwardenSnackbarData,
-        ) : Internal()
-
-        /**
-         * Indicates that there has been a change in [environment].
-         */
-        data class UpdatedEnvironmentReceive(
-            val environment: Environment,
-        ) : Internal()
-
-        /**
-         * Internal action to update the email input state from a non-user action
-         */
-        data class UpdateEmailState(val emailInput: String) : Internal()
+        data class OnOidcCallbackResult(val ssoCallbackResult: SsoCallbackResult) : Internal()
     }
 }
+
+@Parcelize
+data class OidcFlowData(
+    val serverUrl: String,
+    val tokenEndpoint: String,
+    val issuer: String,
+    val clientId: String,
+    val codeVerifier: String,
+    val state: String,
+) : Parcelable
